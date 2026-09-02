@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env
+.env.local
+*.log
+Dockerfile
+.dockerignore
+README.md
+LICENSE
+cloudbuild.yaml
+service.yaml

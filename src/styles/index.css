@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-navy-950 font-sans text-slate-200;
+  }
+
+  html.light body {
+    @apply bg-slate-50 text-slate-800;
+  }
+
+  ::selection {
+    background-color: rgba(76, 201, 240, 0.35);
+    color: #fff;
+  }
+
+  /* Accessible focus rings */
+  :focus-visible {
+    outline: 2px solid rgba(76, 201, 240, 0.7);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #060b1e;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1c2541;
+    border-radius: 8px;
+    border: 2px solid #060b1e;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a4a75;
+  }
+}
+
+@layer components {
+  .text-gradient {
+    @apply bg-gradient-to-r from-electric via-electric-100 to-grape bg-clip-text text-transparent;
+  }
+
+  .glass {
+    @apply border border-white/10 bg-white/5 backdrop-blur-xl;
+  }
+
+  .card-hover {
+    @apply transition-all duration-300 hover:-translate-y-1.5 hover:shadow-glow;
+  }
+}
+
+@layer utilities {
+  .progress-stripes {
+    background-image: linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.15) 25%,
+      transparent 25%,
+      transparent 50%,
+      rgba(255, 255, 255, 0.15) 50%,
+      rgba(255, 255, 255, 0.15) 75%,
+      transparent 75%,
+      transparent
+    );
+    background-size: 1rem 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function owner(uid) { return signedIn() && request.auth.uid == uid; }
+
+    match /users/{uid} {
+      allow read, write: if owner(uid);
+
+      match /journalEntries/{entryId} {
+        allow read, write: if owner(uid);
+      }
+      match /conversations/{conversationId} {
+        allow read, write: if owner(uid);
+      }
+      match /summaries/{summaryId} {
+        allow read, write: if owner(uid);
+      }
+      match /driveExports/{exportId} {
+        allow read, write: if owner(uid);
+      }
+    }
+
+    match /uploadHistory/{docId} {
+      allow read, delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    match /settings/{uid} {
+      allow read, write: if owner(uid);
+    }
+
+    match /driveTokens/{uid} {
+      // Legacy frontend-accessible token doc. Only non-sensitive fields
+      // (access token metadata, drive email, expiry) are stored here.
+      allow read, write: if owner(uid);
+    }
+
+    match /driveTokensServer/{uid} {
+      // Server-only collection. Holds the OAuth refresh token.
+      // The frontend NEVER accesses this — it contains sensitive credentials.
+      allow read, write: if false;
+    }
+  }
+}
