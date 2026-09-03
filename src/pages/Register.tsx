@@ -10,6 +10,7 @@ import { APP_ROUTES } from '@/config/constants';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/useToast';
 import { getErrorMessage } from '@/services/api';
+import { ensureDriveConnectedForGoogle } from '@/services/driveService';
 import { registerSchema, type RegisterInput } from '@/utils/validators';
 import {
   ArrowRightIcon,
@@ -40,7 +41,7 @@ export default function Register() {
   const onSubmit = async (values: RegisterInput) => {
     try {
       await registerAccount(values.displayName, values.email, values.password);
-      navigate(APP_ROUTES.dashboard);
+      navigate(APP_ROUTES.verifyEmail);
     } catch (err) {
       showError('Registration failed', getErrorMessage(err));
     }
@@ -50,7 +51,15 @@ export default function Register() {
     setGoogleLoading(true);
     try {
       await signInWithGoogle();
-      navigate(APP_ROUTES.dashboard);
+      // Auto-connect Drive for Google users after sign-up (per-requirement #1).
+      try {
+        const result = await ensureDriveConnectedForGoogle();
+        if (result === 'connected') {
+          navigate(APP_ROUTES.dashboard);
+        }
+      } catch {
+        navigate(APP_ROUTES.dashboard);
+      }
     } catch (err) {
       showError('Google sign in failed', getErrorMessage(err));
     } finally {

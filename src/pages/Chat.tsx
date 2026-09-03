@@ -8,7 +8,7 @@ import { aiApi } from '@/services/aiService';
 
 export default function Chat() {
   const { user } = useAuth();
-  const { connected: driveConnected } = useDrive();
+  const { connected: driveConnected, connecting: driveConnecting, connect: connectDrive } = useDrive();
 
   const [messages, setMessages] = useState<ChatMessageItem[]>([]);
   const [conversationId, setConversationId] = useState<string | undefined>(undefined);
@@ -63,24 +63,51 @@ export default function Chat() {
 
     setMessages((prev) => [...prev, userMsg]);
 
+    const modelMsgId = `model-${Date.now()}`;
+    // Add an empty placeholder model message that will fill in progressively
+    // as chunks stream from the backend.
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: modelMsgId,
+        role: 'model',
+        content: '',
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    let streamedText = '';
     try {
-      const res = await aiApi.sendMessage(text, conversationId);
+      const res = await aiApi.sendMessageStream(
+        text,
+        conversationId,
+        (chunk) => {
+          streamedText += chunk;
+          // Update the placeholder message in place with the accumulated text.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === modelMsgId ? { ...m, content: streamedText } : m,
+            ),
+          );
+        },
+      );
 
       if (res.conversationId && res.conversationId !== conversationId) {
         setConversationId(res.conversationId);
       }
 
-      const modelMsg: ChatMessageItem = {
-        id: `model-${Date.now()}`,
-        role: 'model',
-        content: res.reply,
-        timestamp: new Date().toISOString(),
-        sources: res.sources,
-      };
-
-      setMessages((prev) => [...prev, modelMsg]);
+      // Finalize the message with full content + sources.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === modelMsgId
+            ? { ...m, content: res.reply || streamedText, sources: res.sources }
+            : m,
+        ),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message to AI.');
+      // Remove the empty placeholder on failure so it doesn't linger.
+      setMessages((prev) => prev.filter((m) => m.id !== modelMsgId));
     } finally {
       setLoading(false);
     }
@@ -103,6 +130,8 @@ export default function Chat() {
         error={error}
         onSendMessage={handleSendMessage}
         driveConnected={driveConnected}
+        driveConnecting={driveConnecting}
+        onConnectDrive={connectDrive}
       />
     </AnimatedPage>
   );

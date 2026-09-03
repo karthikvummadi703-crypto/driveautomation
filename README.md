@@ -204,6 +204,10 @@ cp .env.example .env.local   # add your Firebase API key
 npm run dev                  # http://localhost:3000
 ```
 
+**Important**: Before running the app, follow the [Google Console Setup Guide](./GOOGLE_CONSOLE_SETUP.md) to configure OAuth and avoid verification issues.
+
+**Important**: Before running the app, follow the [Google Console Setup Guide](./GOOGLE_CONSOLE_SETUP.md) to configure OAuth and avoid verification issues.
+
 Production preview:
 
 ```bash

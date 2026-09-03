@@ -10,13 +10,15 @@ export interface ChatContainerProps {
   error: string | null;
   onSendMessage: (text: string) => Promise<void>;
   driveConnected: boolean;
+  driveConnecting?: boolean;
+  onConnectDrive?: () => Promise<void>;
 }
 
 const SUGGESTED_PROMPTS = [
   'What documents are stored in my connected Drive?',
   'Summarize the contents of my latest files.',
-  'What was my total revenue or financial data?',
-  'List all action items found in my notes.',
+  'How much Drive storage capacity am I using?',
+  'List recent activity and modified files.',
 ];
 
 export function ChatContainer({
@@ -25,6 +27,8 @@ export function ChatContainer({
   error,
   onSendMessage,
   driveConnected,
+  driveConnecting,
+  onConnectDrive,
 }: ChatContainerProps) {
   const [inputText, setInputText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -64,16 +68,46 @@ export function ChatContainer({
           <div>
             <h2 className="font-display text-base font-semibold text-white flex items-center gap-2">
               DriveFlow AI Assistant
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className={`flex h-2 w-2 rounded-full ${driveConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
             </h2>
             <p className="text-xs text-slate-400">
               {driveConnected
                 ? 'Grounded on your connected Google Drive files'
-                : 'Connect Drive to query your documents'}
+                : 'Connect Drive to query and analyze your documents'}
             </p>
           </div>
         </div>
+
+        {!driveConnected && onConnectDrive && (
+          <Button
+            variant="primary"
+            size="sm"
+            loading={driveConnecting}
+            onClick={onConnectDrive}
+          >
+            Connect Google Drive
+          </Button>
+        )}
       </div>
+
+      {!driveConnected && (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 px-6 py-3 flex items-center justify-between gap-4">
+          <p className="text-xs text-amber-200">
+            ⚠️ <strong>Google Drive Disconnected:</strong> Connect your Google Drive account so Gemini AI can access and analyze your files.
+          </p>
+          {onConnectDrive && (
+            <Button
+              variant="outline"
+              size="sm"
+              loading={driveConnecting}
+              onClick={onConnectDrive}
+              className="shrink-0 text-xs py-1"
+            >
+              Connect Drive
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Message Stream Scroll Area */}
       <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 space-y-4">

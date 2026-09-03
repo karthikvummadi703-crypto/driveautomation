@@ -18,6 +18,8 @@ steps:
       - "VITE_FIREBASE_APP_ID=${_VITE_FIREBASE_APP_ID}"
       - "--build-arg"
       - "VITE_FIREBASE_MEASUREMENT_ID=${_VITE_FIREBASE_MEASUREMENT_ID}"
+      - "--build-arg"
+      - "VITE_GOOGLE_CLIENT_ID=${_VITE_GOOGLE_CLIENT_ID}"
       - "."
   - name: "gcr.io/cloud-builders/docker"
     args:
@@ -38,6 +40,8 @@ steps:
       - "--allow-unauthenticated"
       - "--memory"
       - "512Mi"
+      - "--set-env-vars"
+      - "GOOGLE_CLIENT_ID=${_GOOGLE_CLIENT_ID},GOOGLE_CLIENT_SECRET=${_GOOGLE_CLIENT_SECRET},GOOGLE_CLOUD_PROJECT=${_GOOGLE_CLOUD_PROJECT},GEMINI_SECRET_NAME=${_GEMINI_SECRET_NAME}"
 images:
   - "gcr.io/$PROJECT_ID/driveflow:$COMMIT_SHA"
 
@@ -52,3 +56,8 @@ substitutions:
   _VITE_FIREBASE_MESSAGING_SENDER_ID: "984526389105"
   _VITE_FIREBASE_APP_ID: "1:984526389105:web:ceb065d624b8f17ab780d0"
   _VITE_FIREBASE_MEASUREMENT_ID: "G-LTEHW0ZLRS"
+  _VITE_GOOGLE_CLIENT_ID: "984526389105-78jesfj2ga9htpi8f8uuqqnchr3nj607.apps.googleusercontent.com"
+  _GOOGLE_CLIENT_ID: "984526389105-78jesfj2ga9htpi8f8uuqqnchr3nj607.apps.googleusercontent.com"
+  _GOOGLE_CLIENT_SECRET: "REPLACE_WITH_ACTUAL_SECRET"
+  _GOOGLE_CLOUD_PROJECT: "n8nsampleproject-ff2c5"
+  _GEMINI_SECRET_NAME: "gemini-api-key"

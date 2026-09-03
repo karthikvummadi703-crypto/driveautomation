@@ -64,7 +64,16 @@ export function DriveGate({ children }: DriveGateProps) {
             You can disconnect at any time from Settings.
           </p>
         </div>
-        {error && <p className="mt-3 text-sm text-rose-400" role="alert">{error}</p>}
+        {error && (
+          <div className="mt-3 rounded-lg bg-rose-400/10 p-3">
+            <p className="text-sm text-rose-400" role="alert">{error}</p>
+            {error.toLowerCase().includes('unverified') && (
+              <p className="mt-2 text-xs text-slate-400">
+                💡 Click "Advanced" → "Go to DriveFlow (unsafe)" on the Google screen to proceed. This is normal during development.
+              </p>
+            )}
+          </div>
+        )}
       </Modal>
     </>
   );

@@ -53,7 +53,7 @@ export async function sendVerificationEmail(
     return null;
   }
 
-  const defaultUrl = process.env.VITE_API_BASE_URL || 'http://localhost:3000';
+  const defaultUrl = process.env.APP_BASE_URL || process.env.VITE_API_BASE_URL || 'http://localhost:3000';
 
   const link = await auth.generateEmailVerificationLink(userRecord.email, {
     url: actionCodeSettings?.url ?? defaultUrl,

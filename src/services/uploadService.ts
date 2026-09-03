@@ -38,16 +38,22 @@ function driveErrorMessage(error: unknown): string {
       return driveApiDisabledMessage();
     }
     if (status === 401) {
-      return 'Your Google Drive session has expired. Please reconnect your Drive and try again.';
+      return 'Your Google Drive session has expired. Please reconnect your Drive from Settings and try again.';
     }
     if (status === 403) {
       return apiMessage || 'Google Drive denied this upload. Check the file type and your Drive quota.';
     }
+    if (status === 413) {
+      return 'File is too large for Google Drive. Try a smaller file or check your Drive storage.';
+    }
+    if (status === 429) {
+      return 'Too many upload requests. Please wait a moment and try again.';
+    }
     if (apiMessage) return apiMessage;
-    if (error.code === 'ECONNABORTED') return 'Upload timed out. Please try again.';
+    if (error.code === 'ECONNABORTED') return 'Upload timed out. Please check your connection and try again.';
     if (error.response) return `Google Drive responded with ${status}. Please try again.`;
-    if (error.request) return 'No response from Google Drive. Check your connection.';
-    return error.message || 'Upload failed.';
+    if (error.request) return 'No response from Google Drive. Check your internet connection.';
+    return error.message || 'Upload failed. Please try again.';
   }
   if (error instanceof Error) return error.message;
   return 'Upload failed. Please try again.';

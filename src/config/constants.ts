@@ -61,5 +61,7 @@ export const APP_ROUTES = {
   settings: '/settings',
   login: '/login',
   register: '/register',
+  verifyEmail: '/verify-email',
   forgotPassword: '/forgot-password',
+  connectDrive: '/connect-drive',
 } as const;

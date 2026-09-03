@@ -2,11 +2,13 @@ import { createBrowserRouter } from 'react-router-dom';
 import { PublicLayout } from '@/layouts/PublicLayout';
 import { DashboardLayout } from '@/layouts/DashboardLayout';
 import { AuthLayout } from '@/layouts/AuthLayout';
-import { ProtectedRoute, PublicOnlyRoute } from './ProtectedRoute';
+import { ProtectedRoute, PublicOnlyRoute, EmailVerificationRoute, AuthenticatedOnlyRoute } from './ProtectedRoute';
 import LandingPage from '@/pages/LandingPage';
 import Login from '@/pages/Login';
 import Register from '@/pages/Register';
+import VerifyEmail from '@/pages/VerifyEmail';
 import ForgotPassword from '@/pages/ForgotPassword';
+import ConnectDrive from '@/pages/ConnectDrive';
 import Dashboard from '@/pages/Dashboard';
 import Upload from '@/pages/Upload';
 import History from '@/pages/History';
@@ -49,6 +51,14 @@ export const router = createBrowserRouter([
         ),
       },
       {
+        path: '/verify-email',
+        element: (
+          <EmailVerificationRoute>
+            <VerifyEmail />
+          </EmailVerificationRoute>
+        ),
+      },
+      {
         path: '/forgot-password',
         element: (
           <PublicOnlyRoute>
@@ -57,6 +67,14 @@ export const router = createBrowserRouter([
         ),
       },
     ],
+  },
+  {
+    element: (
+      <AuthenticatedOnlyRoute>
+        <ConnectDrive />
+      </AuthenticatedOnlyRoute>
+    ),
+    path: '/connect-drive',
   },
   {
     element: (

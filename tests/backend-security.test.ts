@@ -156,4 +156,36 @@ describe('Backend security tests', () => {
     });
     assert.equal(status, 401);
   });
+
+  it('GET /api/drive/oauth/start requires a valid Firebase ID token', async () => {
+    const { status } = await request('/api/drive/oauth/start');
+    assert.equal(status, 401);
+    const invalid = await request('/api/drive/oauth/start', {
+      headers: { Authorization: 'Bearer not-a-real-token' },
+    });
+    assert.equal(invalid.status, 401);
+  });
+
+  it('GET /api/drive/oauth/callback is publicly reachable (no auth) and rejects bad state via redirect', async () => {
+    // The OAuth callback is reached by a browser redirect from Google, so it
+    // must not require (or return) 401. With an invalid/missing state it should
+    // redirect to the frontend error page, not error out or leak data.
+    const res = await fetch(`${baseUrl}/api/drive/oauth/callback?code=abc&state=forged-state`, {
+      redirect: 'manual',
+    });
+    assert.equal(res.status, 302);
+    const location = res.headers.get('location') ?? '';
+    assert.ok(location.includes('connect-drive'));
+    assert.ok(location.includes('error'));
+  });
+
+  it('GET /api/drive/oauth/callback redirects on Google-reported error', async () => {
+    const res = await fetch(
+      `${baseUrl}/api/drive/oauth/callback?error=access_denied`,
+      { redirect: 'manual' },
+    );
+    assert.equal(res.status, 302);
+    const location = res.headers.get('location') ?? '';
+    assert.ok(location.includes('status=error'));
+  });
 });

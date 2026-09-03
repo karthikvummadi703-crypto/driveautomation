@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticateFirebaseUser, requireVerifiedEmail } from '../middleware/auth.js';
-import { chatWithGemini } from '../services/gemini.js';
+import { chatWithGemini, streamChatWithGemini } from '../services/gemini.js';
 import {
   retrieveUserDriveContext,
   buildSystemInstruction,
@@ -138,6 +138,122 @@ router.post('/', async (req, res) => {
     const message = error instanceof Error ? error.message : 'Unable to process chat request.';
     console.error(`[chat] Error: ${message}`);
     res.status(500).json({ error: message });
+  }
+});
+
+/**
+ * POST /api/chat/stream
+ *
+ * Streaming variant of POST /api/chat. Streams the Gemini response back to the
+ * client as Server-Sent Events (SSE) so the answer renders progressively.
+ * Final event carries conversationId + sources (which reference the backend
+ * URL for this same stream route).
+ */
+router.post('/stream', async (req, res) => {
+  const uid = req.user!.uid;
+  const body = req.body as ChatRequestBody;
+
+  const validationError = validateChatInput(body as Record<string, unknown>);
+  if (validationError) {
+    res.status(400).json({ error: validationError });
+    return;
+  }
+
+  const message = body.message!.trim();
+  let conversationId = body.conversationId;
+  let conversation = null;
+  let history: ReturnType<typeof conversationToGeminiHistory> = [];
+
+  try {
+    if (conversationId) {
+      conversation = await getConversation(uid, conversationId);
+      if (!conversation) {
+        res.status(404).json({ error: 'Conversation not found.' });
+        return;
+      }
+      history = conversationToGeminiHistory(conversation.messages);
+      if (history.length > MAX_HISTORY_LENGTH) {
+        history = history.slice(-MAX_HISTORY_LENGTH);
+      }
+    }
+  } catch (loadErr) {
+    console.error(`[chat] load conversation error:`, loadErr);
+    res.status(500).json({ error: 'Unable to load conversation.' });
+    return;
+  }
+
+  // RAG retrieval (run before streaming starts, same as non-streaming path).
+  let ragResult;
+  try {
+    const ragStart = Date.now();
+    ragResult = await retrieveUserDriveContext(uid, message);
+    console.log(`[chat] RAG retrieval for user ${uid}: ${Date.now() - ragStart}ms`);
+  } catch (ragErr) {
+    console.error(`[chat] RAG error:`, ragErr instanceof Error ? ragErr.message : ragErr);
+    ragResult = { documents: [], contextPrompt: '', sources: [] };
+  }
+
+  const systemInstruction = buildSystemInstruction(ragResult);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  let fullReply = '';
+  try {
+    res.write(`event: start\ndata: {"ok":true}\n\n`);
+    for await (const chunk of streamChatWithGemini({
+      message,
+      history,
+      systemInstruction,
+    })) {
+      fullReply += chunk;
+      // Escape for JSON string within SSE data frame.
+      res.write(`data: ${JSON.stringify({ t: chunk })}\n\n`);
+    }
+
+    // Persist messages, then send final event.
+    const userTimestamp = new Date().toISOString();
+    const modelTimestamp = new Date().toISOString();
+
+    if (!conversationId) {
+      const title = message.length > 60 ? message.substring(0, 60) + '...' : message;
+      const newConversation = await createConversation(uid, title);
+      conversationId = newConversation.id;
+    }
+
+    if (!conversationId) throw new Error('conversationId missing after create.');
+    await addConversationMessage(uid, conversationId, {
+      role: 'user',
+      content: message,
+      timestamp: userTimestamp,
+    });
+    await addConversationMessage(uid, conversationId, {
+      role: 'model',
+      content: fullReply,
+      timestamp: modelTimestamp,
+    });
+
+    res.write(
+      `event: done\ndata: ${JSON.stringify({
+        conversationId,
+        sources: ragResult.sources ?? [],
+        reply: fullReply,
+      })}\n\n`,
+    );
+    res.end();
+  } catch (streamErr) {
+    console.error(`[chat] stream error:`, streamErr instanceof Error ? streamErr.message : streamErr);
+    try {
+      const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed.';
+      res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
+    } catch {
+      // ignore write failures after early client disconnect
+    }
+    res.end();
   }
 });
 

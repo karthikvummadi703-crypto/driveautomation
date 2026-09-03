@@ -6,7 +6,12 @@ import {
   deleteDriveTokenRecord,
   getDriveTokenPublicInfo,
 } from '../services/driveTokenService.js';
-import { exchangeRefreshToken, TokenRevokedError } from '../services/driveTokenExchange.js';
+import { exchangeRefreshToken, exchangeAuthorizationCode, TokenRevokedError } from '../services/driveTokenExchange.js';
+import {
+  buildDriveAuthorizationUrl,
+  getDriveRedirectUri,
+} from '../services/driveOAuth.js';
+import { verifyOAuthState } from '../services/oauthState.js';
 import {
   getStorageQuota,
   getDriveAnalytics,
@@ -23,10 +28,163 @@ import {
 import { getDriveActivity } from '../services/driveActivityService.js';
 
 const router = Router();
+
+const FRONTEND_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:3000';
+const FRONTEND_CONNECT_OK = `${FRONTEND_BASE_URL}/connect-drive?status=success`;
+const FRONTEND_CONNECT_ERROR = (reason: string) =>
+  `${FRONTEND_BASE_URL}/connect-drive?status=error&reason=${encodeURIComponent(reason)}`;
+
+/**
+ * GET /api/drive/oauth/callback  (PUBLIC — reached by a browser redirect from Google)
+ *
+ * OAuth redirect_uri for the server-side Drive connect flow. Exchanges the
+ * authorization code for access + refresh tokens, persists them server-side
+ * ONLY (refresh token never reaches the client), then redirects the browser
+ * back to the frontend success/error page.
+ *
+ * This route must be declared before the authenticateFirebaseUser middleware
+ * because Google redirects the browser here without a Firebase ID token.
+ */
+router.get('/oauth/callback', async (req, res) => {
+  const code = typeof req.query.code === 'string' ? req.query.code : null;
+  const state = typeof req.query.state === 'string' ? req.query.state : null;
+  const error = typeof req.query.error === 'string' ? req.query.error : null;
+
+  if (error) {
+    res.redirect(FRONTEND_CONNECT_ERROR(`oauth_error:${error}`));
+    return;
+  }
+
+  if (!code) {
+    res.redirect(FRONTEND_CONNECT_ERROR('missing_code'));
+    return;
+  }
+
+  const uid = state ? verifyOAuthState(state) : null;
+  if (!uid) {
+    res.redirect(FRONTEND_CONNECT_ERROR('invalid_state'));
+    return;
+  }
+
+  try {
+    const redirectUri = getDriveRedirectUri();
+    const { accessToken, refreshToken, expiresIn } = await exchangeAuthorizationCode(code, redirectUri);
+
+    // Determine the connected Drive account email so the UI can show it.
+    let driveEmail: string | null = null;
+    try {
+      const aboutRes = await fetch(
+        'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      if (aboutRes.ok) {
+        const about = (await aboutRes.json()) as { user?: { emailAddress?: string } };
+        driveEmail = about.user?.emailAddress ?? null;
+      }
+    } catch {
+      // Non-fatal — email display is cosmetic; the connection is still valid.
+    }
+
+    const now = Date.now();
+    await saveDriveTokenRecord(uid, {
+      accessToken,
+      refreshToken,
+      expiresAt: now + expiresIn * 1000,
+      grantedAt: now,
+      driveEmail,
+    });
+
+    res.redirect(FRONTEND_CONNECT_OK);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[drive] OAuth callback exchange error: ${message}`);
+    res.redirect(FRONTEND_CONNECT_ERROR('token_exchange_failed'));
+  }
+});
+
+// All remaining Drive routes require a valid Firebase ID token.
 router.use(authenticateFirebaseUser);
-router.use(requireVerifiedEmail);
+
+/**
+ * GET /api/drive/oauth/start  (authenticated)
+ *
+ * Returns the Google OAuth authorization URL for the server-side Drive connect
+ * flow. The frontend navigates the browser to this URL. On success Google
+ * redirects to /api/drive/oauth/callback which stores the tokens server-side.
+ */
+router.get('/oauth/start', async (req, res) => {
+  try {
+    const uid = req.user!.uid;
+    const url = buildDriveAuthorizationUrl(uid);
+    res.json({ url });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[drive] OAuth start error: ${message}`);
+    res.status(500).json({ error: message });
+  }
+});
+// NOTE: requireVerifiedEmail is NOT applied globally here.
+// Token refresh, status, save, and disconnect are allowed for all
+// authenticated users so email/password users can connect their Drive
+// before (and after) verifying their email. Email verification is only
+// required on the sensitive data-access routes (storage, analytics, etc.).
 
 const MIN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * POST /api/drive/connect
+ *
+ * Receives OAuth access + refresh tokens obtained by the frontend via the
+ * Google Identity Services (GIS) consent popup, and persists them to the
+ * server-side token store. The refresh token is written ONLY to the
+ * server-only `driveTokensServer` collection — never exposed to the client.
+ *
+ * This is the primary entry point for establishing (or re-establishing) a
+ * Drive connection for the authenticated user. Calling it again with new
+ * tokens effectively replaces the connection (used for "Change Drive").
+ */
+router.post('/connect', async (req, res) => {
+  try {
+    const uid = req.user!.uid;
+    const { accessToken, refreshToken, driveEmail } = req.body as {
+      accessToken?: unknown;
+      refreshToken?: unknown;
+      driveEmail?: unknown;
+    };
+
+    if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
+      res.status(400).json({ error: 'Access token is required.' });
+      return;
+    }
+
+    if (refreshToken != null && typeof refreshToken !== 'string') {
+      res.status(400).json({ error: 'Refresh token must be a string if provided.' });
+      return;
+    }
+
+    if (driveEmail != null && typeof driveEmail !== 'string') {
+      res.status(400).json({ error: 'Drive email must be a string if provided.' });
+      return;
+    }
+
+    const now = Date.now();
+    // Conservative expiry (GIS tokens default to ~1 hour; 55 min margin).
+    const expiresAt = now + 55 * 60 * 1000;
+
+    await saveDriveTokenRecord(uid, {
+      accessToken,
+      refreshToken: refreshToken ?? null,
+      expiresAt,
+      grantedAt: now,
+      driveEmail: driveEmail ?? null,
+    });
+
+    res.json({ connected: true, driveEmail: driveEmail ?? null });
+  } catch (error) {
+    console.error(`[drive] Connect error:`, error instanceof Error ? error.message : error);
+    res.status(500).json({ error: 'Unable to save Drive connection.' });
+  }
+});
 
 /**
  * POST /api/drive/token
@@ -124,7 +282,7 @@ router.get('/status', async (req, res) => {
  * Returns the user's real Google Drive storage quota via the Drive about API.
  * Uses cached values where available to reduce round-trips.
  */
-router.get('/storage', async (req, res) => {
+router.get('/storage', requireVerifiedEmail, async (req, res) => {
   try {
     const uid = req.user!.uid;
     const quota: DriveStorageQuota = await getStorageQuota(uid);
@@ -161,7 +319,7 @@ router.get('/storage', async (req, res) => {
  * Uses the Drive `files` list with pagination and fields filtering. Never
  * downloads document contents.
  */
-router.get('/analytics', async (req, res) => {
+router.get('/analytics', requireVerifiedEmail, async (req, res) => {
   try {
     const uid = req.user!.uid;
     const analytics: DriveAnalytics = await getDriveAnalytics(uid);
@@ -185,7 +343,7 @@ router.get('/analytics', async (req, res) => {
  *
  * Returns the user's most recently modified Drive files (metadata only).
  */
-router.get('/recent', async (req, res) => {
+router.get('/recent', requireVerifiedEmail, async (req, res) => {
   try {
     const uid = req.user!.uid;
     const limitRaw = req.query.limit;
@@ -214,7 +372,7 @@ router.get('/recent', async (req, res) => {
  * Targeted metadata search across the user's Drive. Used by AI/RAG and callers
  * needing metadata-only results.
  */
-router.get('/search', async (req, res) => {
+router.get('/search', requireVerifiedEmail, async (req, res) => {
   try {
     const uid = req.user!.uid;
     const q = typeof req.query.q === 'string' ? req.query.q : undefined;
@@ -247,7 +405,7 @@ router.get('/search', async (req, res) => {
  * deletes, restores, shares) via the Drive Activity API v2. Normalized into a
  * small frontend-friendly response.
  */
-router.get('/activity', async (req, res) => {
+router.get('/activity', requireVerifiedEmail, async (req, res) => {
   try {
     const uid = req.user!.uid;
     const limitRaw = req.query.limit;

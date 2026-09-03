@@ -10,11 +10,12 @@ import { APP_ROUTES } from '@/config/constants';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/useToast';
 import { getErrorMessage } from '@/services/api';
+import { ensureDriveConnectedForGoogle } from '@/services/driveService';
 import { loginSchema, type LoginInput } from '@/utils/validators';
 import { ArrowRightIcon, EyeIcon, EyeOffIcon, LockIcon, LogInIcon, MailIcon } from '@/components/ui/Icon';
 
 export default function Login() {
-  const { signInWithEmail, signInWithGoogle } = useAuth();
+  const { signInWithEmail, signInWithGoogle, isEmailVerified } = useAuth();
   const { error: showError } = useToast();
   const navigate = useNavigate();
   const [showPassword, setShowPassword] = useState(false);
@@ -32,7 +33,11 @@ export default function Login() {
   const onSubmit = async (values: LoginInput) => {
     try {
       await signInWithEmail(values.email, values.password);
-      navigate(APP_ROUTES.dashboard);
+      if (!isEmailVerified) {
+        navigate(APP_ROUTES.verifyEmail);
+      } else {
+        navigate(APP_ROUTES.dashboard);
+      }
     } catch (err) {
       showError('Sign in failed', getErrorMessage(err));
     }
@@ -42,7 +47,19 @@ export default function Login() {
     setGoogleLoading(true);
     try {
       await signInWithGoogle();
-      navigate(APP_ROUTES.dashboard);
+      // Auto-connect Drive for Google users after sign-in (per-requirement #1).
+      // If the server OAuth redirect starts, a full-page navigation is underway
+      // and we must NOT push the SPA route (the redirect wins on return via
+      // /connect-drive?status=success).
+      try {
+        const result = await ensureDriveConnectedForGoogle();
+        if (result === 'connected') {
+          navigate(APP_ROUTES.dashboard);
+        }
+      } catch {
+        // Best-effort auto-connect; fall back to the dashboard either way.
+        navigate(APP_ROUTES.dashboard);
+      }
     } catch (err) {
       showError('Google sign in failed', getErrorMessage(err));
     } finally {

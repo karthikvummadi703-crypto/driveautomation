@@ -8,13 +8,12 @@ import {
   type ReactNode,
 } from 'react';
 import type { User } from 'firebase/auth';
-import { authService, extractGoogleAccessToken } from '@/firebase/auth';
+import { authService } from '@/firebase/auth';
 import {
   createUserProfile,
   getUserProfile,
   updateUserProfile as persistUserProfile,
 } from '@/services/firestoreService';
-import { autoConnectFromGoogleSignIn } from '@/services/driveService';
 import { DEFAULT_USER_SETTINGS } from '@/config/constants';
 import type { UserProfile, UserProfilePatch } from '@/types/auth';
 
@@ -24,10 +23,13 @@ interface AuthContextValue {
   authLoading: boolean;
   profileLoading: boolean;
   isGoogleUser: boolean;
+  isEmailVerified: boolean;
   canUpload: boolean;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
+  sendVerificationEmail: () => Promise<void>;
+  reloadUser: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -102,28 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refreshProfile]);
 
   const signInWithGoogle = useCallback(async () => {
-    const credential = await authService.signInWithGoogle();
-    // Auto-connect Drive: the Google sign-in popup already grants Drive scope,
-    // so we persist the access token immediately — no separate "Connect" step needed.
-    const accessToken = extractGoogleAccessToken(credential);
-    if (accessToken && credential.user) {
-      const driveEmail =
-        credential.user.providerData.find((p) => p.providerId === 'google.com')?.email ??
-        credential.user.email ??
-        null;
-      // Save Drive token to localStorage + Firestore driveTokens collection.
-      void autoConnectFromGoogleSignIn(credential.user.uid, accessToken, driveEmail);
-      // Also persist the Drive email in the user profile so DriveContext can
-      // restore the "connected" state instantly on any future login without
-      // needing a valid access token in hand.
-      if (driveEmail) {
-        try {
-          await persistUserProfile(credential.user.uid, { connectedDriveEmail: driveEmail });
-        } catch {
-          // Non-fatal — DriveContext will still restore on token fetch.
-        }
-      }
-    }
+    await authService.signInWithGoogle();
     await refreshProfile();
   }, [refreshProfile]);
 
@@ -133,8 +114,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refreshProfile]);
 
   const register = useCallback(async (name: string, email: string, password: string) => {
-    await authService.registerWithEmail(email, password);
+    const credential = await authService.registerWithEmail(email, password);
     await authService.updateDisplayName(name);
+    // Use the UserCredential.user directly — avoids auth.currentUser timing lag.
+    await authService.sendVerificationEmailForUser(credential.user);
+    await refreshProfile();
+  }, [refreshProfile]);
+
+  const sendVerificationEmail = useCallback(async () => {
+    await authService.sendVerificationEmail();
+  }, []);
+
+  const reloadUser = useCallback(async () => {
+    await authService.reloadUser();
     await refreshProfile();
   }, [refreshProfile]);
 
@@ -157,6 +149,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const isGoogleUser = profile?.provider === 'google.com';
+  const isEmailVerified = Boolean(
+    user && (isGoogleUser || user.emailVerified)
+  );
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -165,13 +160,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authLoading,
       profileLoading,
       isGoogleUser,
-      // Any signed-in user can upload as long as they have a Drive token connected.
-      // The DriveContext is the actual gate — if there's no valid token, uploads fail
-      // with a clear error. We do NOT restrict by provider type here.
+      isEmailVerified,
       canUpload: Boolean(user),
       signInWithGoogle,
       signInWithEmail,
       register,
+      sendVerificationEmail,
+      reloadUser,
       resetPassword,
       signOut,
       refreshProfile,
@@ -183,9 +178,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authLoading,
       profileLoading,
       isGoogleUser,
+      isEmailVerified,
       signInWithGoogle,
       signInWithEmail,
       register,
+      sendVerificationEmail,
+      reloadUser,
       resetPassword,
       signOut,
       refreshProfile,

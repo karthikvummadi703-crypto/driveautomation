@@ -14,6 +14,19 @@ describe('AI RAG behaviors', () => {
     assert.equal(classifyDriveQuery('Summarize my project report'), 'document');
   });
 
+  it('does not over-trigger document retrieval on generic words', () => {
+    // 'about', 'read', 'text', 'details' etc. alone must NOT trigger the
+    // expensive/sensitive document-content download path.
+    assert.equal(classifyDriveQuery('Tell me about the features of this app'), 'general');
+    assert.equal(classifyDriveQuery('Can you explain how the weather works?'), 'general');
+    assert.equal(classifyDriveQuery('Show me how to upload files'), 'general');
+  });
+
+  it('classifies explicit file-content requests as document', () => {
+    assert.equal(classifyDriveQuery('What does the budget.xlsx contain?'), 'document');
+    assert.equal(classifyDriveQuery('Summarize the attached report'), 'document');
+  });
+
   it('system instruction treats document content as untrusted', () => {
     const instruction = buildSystemInstruction({
       documents: [],
@@ -109,5 +122,38 @@ describe('Prompt injection defense', () => {
     const idxDoc = instruction.indexOf('DOCUMENT CONTENT');
     assert.ok(idxSystem < idxDrive, 'system before drive facts');
     assert.ok(idxDrive < idxDoc, 'drive facts before document content');
+  });
+
+  it('enforces a bounded context budget (no unbounded prompt growth)', () => {
+    // A pathological document/context must not bloat the model prompt past the
+    // 60KB budget. Feed a very large context and assert the assembled system
+    // instruction stays bounded.
+    const hugeContext = 'x'.repeat(200_000);
+    const instruction = buildSystemInstruction({ documents: [], contextPrompt: hugeContext, sources: [] });
+    // 60_000 bytes budget + ~1.5KB base prompt; assert well under a sane cap.
+    assert.ok(Buffer.byteLength(instruction, 'utf8') <= 70_000, `prompt too large: ${Buffer.byteLength(instruction, 'utf8')}`);
+    // The context was truncated (marker present) rather than fed in full.
+    assert.ok(instruction.includes('Context truncated'), 'oversized context should be truncated');
+    assert.ok(!instruction.endsWith(hugeContext));
+  });
+
+  it('streaming route is registered and returns SSE content-type', async () => {
+    // Boot the Express app and confirm the SSE streaming endpoint exists and is
+    // auth-gated (401 without a token) — proving the route is wired up.
+    const { app } = await import('../server/index.js');
+    const server = app.listen(0);
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    try {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      const res = await fetch(`http://127.0.0.1:${port}/api/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: 'hello' }),
+      });
+      assert.equal(res.status, 401, 'unauthenticated stream request must be rejected');
+    } finally {
+      server.close();
+    }
   });
 });

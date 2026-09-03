@@ -101,33 +101,6 @@ export async function clearDriveToken(uid: string): Promise<void> {
   }
 }
 
-/**
- * Persist the access token obtained from a Google sign-in popup as a Drive
- * token. Called automatically after `signInWithGoogle` succeeds — the user
- * never needs to click "Connect Drive" separately.
- */
-export async function autoConnectFromGoogleSignIn(
-  uid: string,
-  accessToken: string,
-  driveEmail: string | null,
-): Promise<void> {
-  cacheDriveAccessToken(uid, accessToken, driveEmail);
-  const record: DriveTokenRecord = {
-    uid,
-    accessToken,
-    refreshToken: null,
-    driveEmail,
-    expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
-    grantedAt: Date.now(),
-  };
-  try {
-    await saveDriveToken(uid, record);
-  } catch {
-    // Firestore unavailable — the local cache still allows this session to work.
-  }
-}
-
-
 export async function hasUsableDriveToken(uid: string): Promise<boolean> {
   const stored = await getStoredDriveToken(uid);
   if (stored && stored.expiresAt > Date.now() + 60_000) return true;
@@ -235,8 +208,6 @@ async function connectWithGis(hintEmail?: string): Promise<{
   await loadGisScript();
   if (!window.google) throw new Error('Google Identity Services failed to initialize.');
 
-  console.log('[drive] origin=', window.location.origin, 'clientId=', GOOGLE_CLIENT_ID.slice(0, 7), 'scope=', GOOGLE_DRIVE_SCOPE);
-
   return new Promise((resolve, reject) => {
     const tokenClient = window.google!.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
@@ -314,10 +285,80 @@ function normalizeAuthError(error: unknown): Error {
   if (error instanceof Error && isDriveApiDisabledError(error.message)) {
     return new Error(driveApiDisabledMessage());
   }
+  
+  // Handle OAuth verification error specifically
+  if (error instanceof Error) {
+    const errorMessage = error.message.toLowerCase();
+    if (errorMessage.includes('unverified') || errorMessage.includes('hasn\'t been verified') || 
+        errorMessage.includes('screen') || errorMessage.includes('advanced')) {
+      return new Error(
+        'This app is currently in testing mode. To proceed, click "Advanced" → "Go to DriveFlow (unsafe)" in the Google consent screen. This is normal during development. If you\'re the developer, add your email as a test user in Google Cloud Console or submit the app for verification.'
+      );
+    }
+  }
+  
   return error instanceof Error ? error : new Error('Could not connect Google Drive.');
 }
 
 const REFRESH_BEFORE_MS = 5 * 60 * 1000;
+
+/**
+ * Begins the server-side OAuth authorization-code Drive connection flow.
+ *
+ * Requests an authorization URL from the backend, then navigates the browser
+ * to it. Because the browser redirects to accounts.google.com, this function
+ * never resolves — the user is taken away and returned to the frontend via the
+ * backend /oauth/callback (which stores the refresh token server-side) and the
+ * frontend /connect-drive?status=success page.
+ *
+ * This is the preferred connect path because backend `exchangeAuthorizationCode`
+ * (with the client secret) yields a refresh token that enables cross-device
+ * persistence and automatic token refresh — unlike the GIS token flow which
+ * never exposes a refresh token.
+ */
+export async function startServerOAuthConnect(): Promise<never> {
+  if (!auth.currentUser) throw new Error('You must be signed in.');
+  const url = await aiApi.startDriveOAuth();
+  if (!url) throw new Error('Unable to start Google Drive connection.');
+  // Navigate to the Google consent screen; the callback returns us to the app.
+  window.location.assign(url);
+  // This code is unreachable in practice; satisfy the Promise contract.
+  throw new Error('Redirecting to Google to connect Drive...');
+}
+
+/**
+ * Whether the server-side OAuth flow is available. Called before deciding to
+ * navigate away vs. falling back to the (session-only) GIS token flow.
+ */
+export async function serverOAuthConfigured(): Promise<boolean> {
+  try {
+    const url = await aiApi.startDriveOAuth();
+    return Boolean(url);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensures a freshly Google-signed-in user's Drive is connected.
+ *
+ * If the backend already has a server-side Drive connection for the user,
+ * returns 'connected' so the caller can proceed. Otherwise begins the
+ * server-side OAuth authorization-code flow, which navigates the browser to
+ * Google; in that case it returns 'started' and the caller should NOT navigate
+ * away (a full-page redirect is already in progress).
+ */
+export async function ensureDriveConnectedForGoogle(): Promise<'connected' | 'started'> {
+  try {
+    const status = await aiApi.getDriveStatus();
+    if (status.connected) return 'connected';
+  } catch {
+    // Fall through and attempt to start the connection flow.
+  }
+  await startServerOAuthConnect();
+  return 'started';
+}
+
 
 export async function refreshFromServer(uid: string): Promise<StoredDriveToken | null> {
   try {
@@ -352,8 +393,16 @@ export async function getDriveAccessToken(): Promise<string> {
 
   const driveEmailHint = stored?.driveEmail ?? user.email ?? undefined;
 
+  // Prefer the server-side OAuth authorization-code flow. It yields a refresh
+  // token (exchanged with the client secret) that is stored server-side, so the
+  // connection survives across devices and can auto-refresh. GIS cannot return a
+  // refresh token, so it is only used as a fallback for a same-session token.
+  if (await serverOAuthConfigured()) {
+    await startServerOAuthConnect();
+    throw new Error('Redirecting to Google to connect Drive...');
+  }
+
   if (gisConfigured()) {
-    console.log('[drive] choosing GIS path, origin=', window.location.origin);
     try {
       const { accessToken, refreshToken } = await connectWithGis(driveEmailHint ?? undefined);
       const driveEmail = stored?.driveEmail ?? user.email ?? null;
@@ -371,6 +420,13 @@ export async function getDriveAccessToken(): Promise<string> {
       } catch {
         // Firestore unavailable — the local cache still lets this session upload.
       }
+      // Persist tokens to the backend so the refresh token is stored
+      // server-side and the connection survives across devices.
+      try {
+        await aiApi.saveDriveTokens(accessToken, refreshToken ?? null, driveEmail);
+      } catch {
+        // Non-fatal for this session — server store will be used on next refresh.
+      }
       return accessToken;
     } catch (err) {
       throw normalizeAuthError(err);
@@ -386,7 +442,6 @@ export async function getDriveAccessToken(): Promise<string> {
     // Redirect cannot be blocked by the browser the way popups can, so this is
     // the most reliable path for first-time and "change Drive" connects. The
     // result is finalized on the next page load by completeRedirectConnect().
-    console.log('[drive] choosing REDIRECT path, origin=', window.location.origin);
     if (isGoogleAccount) {
       await reauthenticateWithRedirect(user, provider);
     } else {
@@ -427,6 +482,14 @@ export async function completeRedirectConnect(): Promise<StoredDriveToken | null
       await saveDriveToken(user.uid, record);
     } catch {
       // Firestore unavailable — the local cache still lets this session upload.
+    }
+    // Register the connection with the backend. The redirect flow may not
+    // surface a refresh token, but storing the connection server-side ensures
+    // the user's Drive status is recognized across devices.
+    try {
+      await aiApi.saveDriveTokens(credential.accessToken, null, driveEmail);
+    } catch {
+      // Non-fatal — backend availability is not guaranteed during redirect.
     }
     return {
       uid: user.uid,

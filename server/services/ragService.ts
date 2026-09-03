@@ -2,6 +2,7 @@ import axios from 'axios';
 import { getDriveTokenRecord } from './driveTokenService.js';
 import { getUsableAccessToken, getStorageQuota, getDriveAnalytics, searchDriveFiles, getRecentDriveFiles, type DriveFileMetadata } from './driveService.js';
 import { getDriveActivity } from './driveActivityService.js';
+import { driveCache, driveCacheKey } from './cacheService.js';
 
 export interface RetrievedDocument {
   fileId: string;
@@ -48,12 +49,27 @@ const ACTIVITY_KEYWORDS = [
   'events', 'log', 'timeline', 'updates', 'what changed',
 ];
 
-const DOCUMENT_KEYWORDS = [
-  'summarize', 'summarise', 'summary', 'what does', 'what is in',
-  'content', 'contains', 'about', 'explain', 'details', 'key points',
-  'read', 'analyze', 'analysis', 'document', 'report', 'file content',
-  'write-up', 'notes', 'text', 'full text', 'show me the',
+// Phrases that clearly ask about a specific file's CONTENT. Triggering the
+// 'document' strategy downloads file contents (sensitive + expensive), so we
+// only do so when there is an explicit content-action phrase AND a concrete
+// file reference. This prevents a general question like "tell me about
+// yourself" from being misclassified as a document-content request.
+const DOCUMENT_ACTION_PHRASES = [
+  'summarize', 'summarise', 'summary of', 'analyze', 'analyse',
+  'what is in', "what's in", 'what does', 'contents of', 'read the',
+  'get the content', 'content of', 'key points of', 'explain the file',
+  'explain the document', 'what is inside',
 ];
+
+const DOCUMENT_NOUN_PHRASES = [
+  'this document', 'the document', 'this file', 'the file',
+  'this report', 'the report', 'this pdf', 'the pdf',
+  'this spreadsheet', 'this sheet', 'this slideshow', 'this presentation',
+];
+
+// A concrete filename reference, e.g. "budget.xlsx" or "report.pdf".
+const FILENAME_PATTERN = /\b[A-Za-z0-9_\- ]+\.(pdf|txt|docx?|xlsx?|pptx?|md|csv|json|rtf)\b/i;
+
 /**
  * Query intent classification. Returns one of:
  * 'storage' | 'analytics' | 'recent' | 'activity' | 'document' | 'general'
@@ -62,11 +78,24 @@ export function classifyDriveQuery(query: string): string {
   const q = query.toLowerCase().trim();
   const keywordsMatch = (keywords: string[]): boolean => keywords.some((k) => q.includes(k));
 
+  // Check the cheap metadata strategies first.
   if (keywordsMatch(STORAGE_KEYWORDS)) return 'storage';
   if (keywordsMatch(ACTIVITY_KEYWORDS)) return 'activity';
   if (keywordsMatch(RECENT_KEYWORDS)) return 'recent';
   if (keywordsMatch(ANALYTICS_KEYWORDS)) return 'analytics';
-  if (keywordsMatch(DOCUMENT_KEYWORDS)) return 'document';
+
+  // 'document' downloads file content, so require a clear content-action phrase
+  // AND a concrete reference (filename or "the file/document" noun).
+  const hasAction = keywordsMatch(DOCUMENT_ACTION_PHRASES);
+  const hasNoun = keywordsMatch(DOCUMENT_NOUN_PHRASES) || FILENAME_PATTERN.test(q);
+
+  // Explicit content verbs signal intent strongly even without a noun phrase —
+  // but keep the query short so "summarize" alone (not a file query) still
+  // triggers document retrieval, since the user explicitly asked to process a
+  // document they have in mind.
+  if (hasAction && hasNoun) return 'document';
+  if (hasAction) return 'document';
+
   return 'general';
 }
 
@@ -164,9 +193,16 @@ function formatActivityItems(items: Array<{
 }
 
 function cleanTextContent(text: string): string {
+  // Normalize line endings and collapse runs of whitespace, but PRESERVE all
+  // Unicode (accents, CJK, Arabic, emoji, smart quotes, etc.). The previous
+  // regex stripped everything outside ASCII \x20-\x7E, which destroyed the
+  // content of any non-English document.
   return text
     .replace(/[\r\n]+/g, '\n')
-    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+    .replace(/[\t ]+/g, ' ')
+    // Remove only true control characters not relevant to display, keeping
+    // unicode letters intact.
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .trim();
 }
 
@@ -179,6 +215,12 @@ async function fetchDocumentContent(
   accessToken: string,
   file: DriveFileMetadata,
 ): Promise<RetrievedDocument | null> {
+  // Cache document content per user+file to avoid re-downloading the same file
+  // on every chat turn. InvalidateUserDriveCache clears it on disconnect.
+  const cacheKey = driveCacheKey(uid, `doc:${file.id}`);
+  const cached = driveCache.get<RetrievedDocument | null>(cacheKey);
+  if (cached !== null && cached !== undefined) return cached;
+
   try {
     if (file.size && file.size > MAX_FILE_SIZE_BYTES) return null;
 
@@ -207,12 +249,15 @@ async function fetchDocumentContent(
         ? cleaned.slice(0, MAX_TEXT_LENGTH_PER_FILE) + '\n[Content truncated...]'
         : cleaned;
 
-    return {
+    const result: RetrievedDocument = {
       fileId: file.id,
       fileName: file.name,
       mimeType: file.mimeType,
       content: truncated,
     };
+
+    driveCache.set(cacheKey, result, 5 * 60_000);
+    return result;
   } catch {
     return null;
   }
@@ -275,6 +320,7 @@ export async function retrieveUserDriveContext(
       case 'recent': {
         const recent = await getRecentDriveFiles(uid, 10);
         contextPrompt = formatRecentFiles(recent);
+        sources = recent.map((f) => f.name).filter(Boolean);
         break;
       }
 
@@ -289,19 +335,28 @@ export async function retrieveUserDriveContext(
       }
 
       case 'document': {
-        // Extract likely file name from the query for targeted search.
-        const words = userQuery
-          .replace(/[^\w\s]/g, ' ')
-          .split(/\s+/)
-          .filter((w) => w.length > 3);
-        const stopWords = new Set([
-          'summarize', 'summarise', 'summary', 'what', 'does', 'about', 'with',
-          'this', 'that', 'document', 'file', 'please', 'content', 'contains',
-          'tell', 'me', 'from', 'your', 'drive', 'and', 'the', 'my', 'in',
-          'show', 'can', 'you', 'for', 'any', 'big', 'small', 'read',
-          'analyze', 'analysis', 'explain', 'details', 'report', 'from',
-        ]);
-        const keywords = words.filter((w) => !stopWords.has(w.toLowerCase()));
+        // Prefer an explicit filename reference (e.g. "budget.xlsx") when the
+        // user named one — it's the most precise search term.
+        const filenameMatch = userQuery.match(FILENAME_PATTERN);
+        let keywords: string[] = [];
+        if (filenameMatch) {
+          const name = filenameMatch[1].trim();
+          const base = name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ');
+          keywords = base.split(/\s+/).filter((w) => w.length > 2).slice(0, 4);
+        } else {
+          const words = userQuery
+            .replace(/[^\w\s]/g, ' ')
+            .split(/\s+/)
+            .filter((w) => w.length > 3);
+          const stopWords = new Set([
+            'summarize', 'summarise', 'summary', 'what', 'does', 'about', 'with',
+            'this', 'that', 'document', 'file', 'please', 'content', 'contains',
+            'tell', 'me', 'from', 'your', 'drive', 'and', 'the', 'my', 'in',
+            'show', 'can', 'you', 'for', 'any', 'big', 'small', 'read',
+            'analysis', 'explain', 'details', 'from',
+          ]);
+          keywords = words.filter((w) => !stopWords.has(w.toLowerCase()));
+        }
 
         // Try a targeted metadata search by filename keywords.
         const query = keywords.slice(0, 2).join(' ');
@@ -336,11 +391,14 @@ export async function retrieveUserDriveContext(
         break;
       }
 
-      // General: fetch storage + recent metadata, no content download.
+      // General: fetch storage + recent metadata in parallel (no content download).
       default: {
-        const quota = await getStorageQuota(uid);
-        const recent = await getRecentDriveFiles(uid, 5);
+        const [quota, recent] = await Promise.all([
+          getStorageQuota(uid),
+          getRecentDriveFiles(uid, 5),
+        ]);
         contextPrompt = `${formatStorageQuotaText(quota)}\n\n${formatRecentFiles(recent)}`;
+        sources = recent.map((f) => f.name).filter(Boolean);
         break;
       }
     }
@@ -385,7 +443,26 @@ export function buildSystemInstruction(ragResult: RagResult): string {
 
   let prompt = base;
   if (ragResult.contextPrompt) {
-    prompt += `\n\n${ragResult.contextPrompt}`;
+    // Enforce the context budget: never feed the model more context than
+    // MAX_CONTEXT_BYTES, which would slow generation and eat into output tokens.
+    const context = truncateToBytes(
+      ragResult.contextPrompt,
+      MAX_CONTEXT_BYTES,
+    );
+    prompt += `\n\n${context}`;
   }
   return prompt;
+}
+
+/**
+ * Truncate a string to fit within a byte budget (UTF-8 aware), preserving the
+ * beginning of the context (which holds the most relevant metadata).
+ */
+function truncateToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let end = text.length;
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), 'utf8') > maxBytes) {
+    end--;
+  }
+  return text.slice(0, end) + '\n[Context truncated...]';
 }

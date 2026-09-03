@@ -13,13 +13,11 @@ import {
   clearDriveToken,
   completeRedirectConnect,
   getDriveAccessToken,
-  getDriveStorageQuota,
   getStoredDriveToken,
-  getStoredAccessTokenSilent,
-  refreshFromServer,
   type DriveStorageQuota,
 } from '@/services/driveService';
 import { updateUserProfile } from '@/services/firestoreService';
+import { aiApi } from '@/services/aiService';
 
 interface DriveContextValue {
   driveLoading: boolean;
@@ -91,10 +89,31 @@ export function DriveProvider({ children }: { children: ReactNode }) {
           setDriveEmail(record.driveEmail ?? profileDriveEmail);
           // Token is now confirmed — fetch real Drive storage quota.
           void refreshStorageRef.current();
-        } else if (!profileDriveEmail) {
-          // No token in storage AND no saved driveEmail in profile — truly disconnected.
-          setConnected(false);
-          setDriveEmail(null);
+        } else if (profileDriveEmail) {
+          // No fresh token right now, but the profile says Drive was connected
+          // before — leave connected=true so an upload can refresh lazily.
+        } else {
+          // No token in localStorage/Firestore and no saved driveEmail. The
+          // authoritative server store (which persists across devices and holds
+          // the refresh token) may still have a connection — e.g. right after a
+          // Google sign-in / server OAuth redirect, or on a second device. Query
+          // /api/drive/status so the UI reflects the true server-side state.
+          try {
+            const status = await aiApi.getDriveStatus();
+            if (cancelled) return;
+            if (status.connected) {
+              setConnected(true);
+              setDriveEmail(status.driveEmail ?? null);
+              void refreshStorageRef.current();
+            } else {
+              setConnected(false);
+              setDriveEmail(null);
+            }
+          } catch {
+            if (cancelled) return;
+            setConnected(false);
+            setDriveEmail(null);
+          }
         }
         // If there's no fresh token but profile has driveEmail, leave connected=true
         // (set above). The token will be refreshed lazily when an upload is attempted.
@@ -112,24 +131,17 @@ export function DriveProvider({ children }: { children: ReactNode }) {
     if (!user) return;
     setStorageLoading(true);
     try {
-      const accessToken = await getStoredAccessTokenSilent(user.uid);
-      if (!accessToken) {
-        setStorageQuota(null);
-        return;
-      }
-      try {
-        const quota = await getDriveStorageQuota(accessToken);
-        setStorageQuota(quota);
-      } catch (quotaErr) {
-        console.warn('[driveContext] Primary quota fetch failed, attempting server refresh:', quotaErr);
-        const refreshed = await refreshFromServer(user.uid);
-        if (refreshed?.accessToken) {
-          const quota = await getDriveStorageQuota(refreshed.accessToken);
-          setStorageQuota(quota);
-        } else {
-          setStorageQuota(null);
-        }
-      }
+      // Fetch quota via the backend, which refreshes expired access tokens
+      // server-side (using the stored refresh token) and caches results. This
+      // avoids calling the Google API directly from the browser, which would
+      // fail silently once a short-lived access token expires.
+      const storage = await aiApi.getDriveStorage();
+      setStorageQuota({
+        limit: storage.limit,
+        usage: storage.usage,
+        usageInDrive: storage.usageInDrive,
+        usageInDriveTrash: storage.usageInDriveTrash ?? 0,
+      });
     } catch (err) {
       console.warn('[driveContext] refreshStorage error:', err);
       setStorageQuota(null);
@@ -168,6 +180,17 @@ export function DriveProvider({ children }: { children: ReactNode }) {
           // Non-fatal: Drive is still connected for this session.
         }
       }
+    } catch (error) {
+      // Enhance error message with OAuth verification guidance
+      if (error instanceof Error) {
+        const errorMessage = error.message.toLowerCase();
+        if (errorMessage.includes('unverified') || errorMessage.includes('hasn\'t been verified')) {
+          throw new Error(
+            'Google requires app verification. Please click "Advanced" → "Go to DriveFlow (unsafe)" to proceed. This is normal during development. To remove this screen, add your email as a test user in Google Cloud Console or submit the app for verification.'
+          );
+        }
+      }
+      throw error;
     } finally {
       setConnecting(false);
     }
@@ -175,6 +198,14 @@ export function DriveProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback(async () => {
     if (!user) return;
+    // Clear the server-side credential store FIRST so the refresh token is
+    // revoked for this user across all devices (prevents resurrecting the
+    // connection from another device after the user explicitly disconnects).
+    try {
+      await aiApi.disconnectDrive();
+    } catch {
+      // Non-fatal for the local session — local cleanup still proceeds.
+    }
     await clearDriveToken(user.uid);
     setConnected(false);
     setDriveEmail(null);
