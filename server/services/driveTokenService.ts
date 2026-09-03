@@ -32,6 +32,16 @@ function driveTokensServerDoc(uid: string) {
 const inMemoryTokens = new Map<string, DriveTokenDoc>();
 const inMemoryServerTokens = new Map<string, string>();
 
+// Short-lived cache of the merged token record per user. Avoids repeated
+// Firestore reads (driveTokens + driveTokensServer) on every request that
+// needs a usable token (storage, analytics, recent, search, activity). The
+// record is immutable between save/delete, so this is behavior-preserving.
+const TOKEN_CACHE_TTL_MS = 30_000;
+const tokenRecordCache = new Map<
+  string,
+  { record: DriveTokenDoc | null; expiresAt: number }
+>();
+
 /**
  * Read a Drive token record for a user.
  *
@@ -41,6 +51,12 @@ const inMemoryServerTokens = new Map<string, string>();
  * compatibility with existing users.
  */
 export async function getDriveTokenRecord(uid: string): Promise<DriveTokenDoc | null> {
+  const now = Date.now();
+  const cached = tokenRecordCache.get(uid);
+  if (cached && cached.expiresAt > now) {
+    return cached.record;
+  }
+
   let accessToken = '';
   let refreshToken: string | null | undefined;
   let expiresAt = 0;
@@ -89,8 +105,21 @@ export async function getDriveTokenRecord(uid: string): Promise<DriveTokenDoc | 
     refreshToken = inMemoryServerTokens.get(uid);
   }
 
-  if (!accessToken) return null;
-  return { uid, accessToken, refreshToken, expiresAt, grantedAt, driveEmail };
+  if (!accessToken) {
+    tokenRecordCache.set(uid, { record: null, expiresAt: Date.now() + TOKEN_CACHE_TTL_MS });
+    return null;
+  }
+
+  const result: DriveTokenDoc = {
+    uid,
+    accessToken,
+    refreshToken,
+    expiresAt,
+    grantedAt,
+    driveEmail,
+  };
+  tokenRecordCache.set(uid, { record: result, expiresAt: Date.now() + TOKEN_CACHE_TTL_MS });
+  return result;
 }
 
 /**
@@ -108,6 +137,7 @@ export async function saveDriveTokenRecord(
 ): Promise<void> {
   const fullRecord: DriveTokenDoc = { uid, ...record };
   inMemoryTokens.set(uid, fullRecord);
+  tokenRecordCache.delete(uid);
 
   const now = Date.now();
 
@@ -152,6 +182,7 @@ export async function saveDriveTokenRecord(
 export async function deleteDriveTokenRecord(uid: string): Promise<void> {
   inMemoryTokens.delete(uid);
   inMemoryServerTokens.delete(uid);
+  tokenRecordCache.delete(uid);
   try {
     await driveTokensDoc(uid).delete();
   } catch {

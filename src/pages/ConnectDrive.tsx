@@ -67,6 +67,11 @@ export default function ConnectDrive() {
       await connect();
       success('Google Drive connected successfully!', 'You can now upload files to your personal Drive.');
     } catch (err) {
+      // The GIS "redirect to Google" flow is in-progress navigation, not a
+      // failure. Don't surface it as an error popup/inline error.
+      if (err instanceof Error && err.message.includes('Redirecting to Google')) {
+        return;
+      }
       setStep('intro');
       const errorMessage = getErrorMessage(err);
       setError(errorMessage);

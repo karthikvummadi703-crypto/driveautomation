@@ -105,7 +105,18 @@ export default function Chat() {
         ),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send message to AI.');
+      const raw = err instanceof Error ? err.message : '';
+      console.error('[chat] send error:', err);
+      // Keep genuinely actionable messages inline, otherwise avoid surfacing
+      // verbose internal/API text (project IDs, long console URLs) to the user.
+      const friendly =
+        /please verify your email|verify your email|EMAIL_NOT_VERIFIED/i.test(raw) ||
+        /conversation not found/i.test(raw) ||
+        /too many requests|rate limit|slow down/i.test(raw) ||
+        /no drive connection|connect google drive/i.test(raw)
+          ? raw
+          : 'I couldn\u2019t generate a response. Please try again.';
+      setError(friendly);
       // Remove the empty placeholder on failure so it doesn't linger.
       setMessages((prev) => prev.filter((m) => m.id !== modelMsgId));
     } finally {

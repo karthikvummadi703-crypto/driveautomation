@@ -32,7 +32,7 @@ type UploadPhase = 'idle' | 'uploading' | 'success' | 'error';
 export default function Upload() {
   const { user, profile } = useAuth();
   const { getAccessToken } = useDrive();
-  const { success: showSuccess, error: showError } = useToast();
+  const { success: showSuccess } = useToast();
   const navigate = useNavigate();
 
   const [file, setFile] = useState<File | null>(null);
@@ -127,9 +127,8 @@ export default function Upload() {
       const message = getErrorMessage(err);
       setErrorMessage(message);
       setPhase('error');
-      showError('Upload failed', message);
     }
-  }, [file, user, profile, showSuccess, showError]);
+  }, [file, user, profile, showSuccess]);
 
   const handleDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {

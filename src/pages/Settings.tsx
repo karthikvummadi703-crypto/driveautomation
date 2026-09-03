@@ -75,7 +75,10 @@ export default function Settings() {
       await connect();
       success('Google Drive connected', 'Uploads will now go to your own Drive.');
     } catch (err) {
-      showError('Could not connect Google Drive', getErrorMessage(err));
+      // The connect flow showing the Google consent page is not a failure.
+      if (!(err instanceof Error) || !err.message.includes('Redirecting to Google')) {
+        showError('Could not connect Google Drive', getErrorMessage(err));
+      }
     } finally {
       setDriveBusy(false);
     }
