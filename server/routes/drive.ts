@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateFirebaseUser, requireVerifiedEmail } from '../middleware/auth.js';
+import { getAdminAuth } from '../services/firebaseAdmin.js';
 import {
   getDriveTokenRecord,
   saveDriveTokenRecord,
@@ -69,6 +70,23 @@ router.get('/oauth/callback', async (req, res) => {
   try {
     const redirectUri = getDriveRedirectUri();
     const { accessToken, refreshToken, expiresIn } = await exchangeAuthorizationCode(code, redirectUri);
+
+    // Only persist credentials for users whose account email is verified.
+    // Google-authenticated accounts are inherently verified; email/password
+    // users must confirm their email before their Drive credentials are stored.
+    let verified = false;
+    try {
+      const auth = getAdminAuth();
+      const userRecord = await auth.getUser(uid);
+      const isGoogle = userRecord.providerData[0]?.providerId === 'google.com';
+      verified = isGoogle || Boolean(userRecord.emailVerified);
+    } catch {
+      verified = false;
+    }
+    if (!verified) {
+      res.redirect(FRONTEND_CONNECT_ERROR('email_not_verified'));
+      return;
+    }
 
     // Determine the connected Drive account email so the UI can show it.
     let driveEmail: string | null = null;
@@ -146,6 +164,18 @@ const MIN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
 router.post('/connect', async (req, res) => {
   try {
     const uid = req.user!.uid;
+
+    // Harden: only persist Drive credentials once the account email is
+    // verified. Google-authenticated accounts are inherently verified;
+    // email/password users must confirm their email first.
+    if (req.user!.provider !== 'google.com' && !req.user!.emailVerified) {
+      res.status(403).json({
+        error: 'Please verify your email address before connecting Google Drive.',
+        code: 'EMAIL_NOT_VERIFIED',
+      });
+      return;
+    }
+
     const { accessToken, refreshToken, driveEmail } = req.body as {
       accessToken?: unknown;
       refreshToken?: unknown;

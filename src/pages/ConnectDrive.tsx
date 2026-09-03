@@ -42,6 +42,8 @@ export default function ConnectDrive() {
         setError(`Google authorization was not completed (${reason.replace('oauth_error:', '')}).`);
       } else if (reason === 'token_exchange_failed') {
         setError('Could not complete the Google Drive connection. Check that GOOGLE_CLIENT_SECRET is configured.');
+      } else if (reason === 'email_not_verified') {
+        setError('Please verify your email address before connecting Google Drive. Check your inbox for the verification link.');
       } else {
         setError('The Google Drive connection could not be completed. Please try again.');
       }
