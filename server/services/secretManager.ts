@@ -10,6 +10,37 @@ async function getClient(): Promise<SecretManagerServiceClient> {
   return secretClient;
 }
 
+/**
+ * Collect all configured Gemini API keys, in priority order, so callers can
+ * rotate automatically when one hits its rate limit or becomes invalid.
+ * Supported sources (first match wins, in order):
+ *   1. GEMINI_API_KEYS          - comma-separated list
+ *   2. DEV_GEMINI_API_KEY       - primary dev key
+ *   3. GEMINI_API_KEY           - generic fallback
+ *   4. GEMINI_KEY_2, GEMINI_KEY_3, ...  - additional numbered keys
+ */
+export function getGeminiApiKeys(): string[] {
+  const keys: string[] = [];
+
+  const commaKeys = process.env.GEMINI_API_KEYS;
+  if (commaKeys) {
+    for (const k of commaKeys.split(',').map((s) => s.trim())) {
+      if (k) keys.push(k);
+    }
+  }
+
+  const primary = process.env.DEV_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  if (primary) keys.push(primary);
+
+  for (let i = 2; ; i++) {
+    const k = process.env[`GEMINI_KEY_${i}`];
+    if (k) keys.push(k);
+    else break;
+  }
+
+  return keys;
+}
+
 export async function getSecret(secretName: string): Promise<string> {
   const cached = secretCache.get(secretName);
   if (cached) return cached;
