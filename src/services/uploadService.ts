@@ -70,7 +70,7 @@ export async function uploadFileToDrive(payload: UploadFilePayload): Promise<Upl
   const startedAt = Date.now();
   const boundary = `driveflow_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const mimeType = payload.file.type || 'application/octet-stream';
-  const metadata = JSON.stringify({ name: payload.file.name, mimeType });
+  const metadata = JSON.stringify({ name: payload.file.name, mimeType, parents: ['root'] });
 
   const body = new Blob(
     [
